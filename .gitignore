@@ -1,0 +1,23 @@
+# Data directories
+data/movielens/
+data/tmdb/
+data/processed/
+
+# Model artifacts
+models/saved/
+
+# Environment
+.env
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
