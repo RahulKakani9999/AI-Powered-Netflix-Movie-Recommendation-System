@@ -51,6 +51,44 @@ def _normalize_title(title: str) -> str:
     return t
 
 
+# Roman numeral → Arabic digit substitutions (longest patterns first to avoid
+# "iv" matching inside "viii", etc.)
+_ROMAN_TO_ARABIC = [
+    ("viii", "8"), ("vii", "7"), ("vi", "6"), ("iv", "4"),
+    ("iii", "3"), ("ii", "2"), ("v", "5"),
+]
+
+
+def _normalize_aggressive(title: str) -> str:
+    """More aggressive normalization used as a stage-4 fallback.
+
+    Extends _normalize_title with:
+    - "&" → "and"  (instead of silently dropping &)
+    - Roman numerals → Arabic digits (ii→2, iii→3, iv→4, v→5, vi→6 …)
+    - Removes all instances of "the", not only the leading article
+    """
+    t = str(title).strip()
+    # Move trailing article to front
+    t = re.sub(r"^(.*),\s*(The|A|An)$", r"\2 \1", t, flags=re.IGNORECASE)
+    t = t.lower()
+    # Strip leading article
+    for prefix in ("the ", "a ", "an "):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    # & → "and" before punctuation removal so it isn't silently dropped
+    t = re.sub(r"\s*&\s*", " and ", t)
+    # Remove remaining punctuation
+    t = re.sub(r"[,:\-'\.!?]", " ", t)
+    # Roman numerals → Arabic (whole-word matches only)
+    for roman, arabic in _ROMAN_TO_ARABIC:
+        t = re.sub(rf"\b{roman}\b", arabic, t)
+    # Remove all remaining instances of "the" (middle / end as well)
+    t = re.sub(r"\bthe\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
@@ -75,11 +113,12 @@ def load_movielens_movies() -> pd.DataFrame:
         names=["movie_id", "title", "genres_raw"],
         encoding="latin-1",
     )
-    df["year"] = df["title"].apply(_extract_year)
+    df["year"]       = df["title"].apply(_extract_year)
     df["clean_title"] = df["title"].apply(_clean_title)
-    df["genres_ml"] = df["genres_raw"].str.split("|")
-    df["title_norm"] = df["clean_title"].str.lower().str.strip()
+    df["genres_ml"]  = df["genres_raw"].str.split("|")
+    df["title_norm"]  = df["clean_title"].str.lower().str.strip()
     df["title_norm2"] = df["clean_title"].apply(_normalize_title)
+    df["title_agg"]   = df["clean_title"].apply(_normalize_aggressive)
     print(f"  Movies  : {len(df):,} rows")
     return df
 
@@ -93,7 +132,7 @@ def load_tmdb() -> Optional[pd.DataFrame]:
         print("  Continuing with MovieLens-only data (no TMDB enrichment).")
         return None
 
-    movies = pd.read_csv(movies_path)
+    movies  = pd.read_csv(movies_path)
     credits = pd.read_csv(credits_path)
 
     # tmdb_5000_credits has movie_id; merge on movies.id
@@ -108,11 +147,7 @@ def load_tmdb() -> Optional[pd.DataFrame]:
     # Director: first crew member whose job is "Director"
     df["director"] = df["crew"].apply(
         lambda crew: next(
-            (
-                m["name"]
-                for m in crew
-                if isinstance(m, dict) and m.get("job") == "Director"
-            ),
+            (m["name"] for m in crew if isinstance(m, dict) and m.get("job") == "Director"),
             "",
         )
     )
@@ -131,18 +166,19 @@ def load_tmdb() -> Optional[pd.DataFrame]:
     # Year derived from release_date (used for matching with MovieLens)
     df["tmdb_year"] = pd.to_datetime(df["release_date"], errors="coerce").dt.year
 
-    # Normalised titles for matching — kept separate from ml columns
-    df["tmdb_title_norm"] = df["title"].str.lower().str.strip()
+    # Normalised titles — all three variants computed before renaming "title"
+    df["tmdb_title_norm"]  = df["title"].str.lower().str.strip()
     df["tmdb_title_norm2"] = df["title"].apply(_normalize_title)
+    df["tmdb_title_agg"]   = df["title"].apply(_normalize_aggressive)
 
     # Rename columns that would clash with MovieLens columns after merge
     df = df.rename(
         columns={
-            "title": "tmdb_title",
-            "genres": "tmdb_genres",
+            "title":    "tmdb_title",
+            "genres":   "tmdb_genres",
             "keywords": "tmdb_keywords",
-            "cast": "tmdb_cast",
-            "id": "tmdb_id",
+            "cast":     "tmdb_cast",
+            "id":       "tmdb_id",
         }
     )
 
@@ -151,47 +187,115 @@ def load_tmdb() -> Optional[pd.DataFrame]:
 
 
 # ---------------------------------------------------------------------------
-# Merge
+# Merge — 5-stage matching pipeline
 # ---------------------------------------------------------------------------
 
 def merge_datasets(ml_movies: pd.DataFrame, tmdb: pd.DataFrame) -> pd.DataFrame:
-    # Build lookup: (normalized_title, year) → tmdb DataFrame index
-    tmdb_lookup: dict[tuple, int] = {}
+    from difflib import SequenceMatcher
+
+    # ── Pre-build all TMDB lookup structures ──────────────────────────────
+    # Stage 1+2: (title_norm2, year) → tmdb_index
+    tmdb_yr_lkp:    dict[tuple, int]       = {}
+    # Stage 3:   title_norm2 → [tmdb_index, ...]  (unique-title check)
+    tmdb_title_lkp: dict[str, list[int]]   = {}
+    # Stage 4:   (title_agg, year) → tmdb_index
+    tmdb_agg_lkp:   dict[tuple, int]       = {}
+    # Stage 5:   year → [(title_norm2, tmdb_index), ...]  (fuzzy candidates)
+    tmdb_by_yr:     dict[int, list[tuple]] = {}
+
     for idx, row in tmdb.iterrows():
-        yr = row["tmdb_year"]
-        if pd.isna(yr):
-            continue
-        key = (row["tmdb_title_norm2"], int(yr))
-        if key not in tmdb_lookup:   # first entry wins (avoids duplicates)
-            tmdb_lookup[key] = idx
+        t2     = row["tmdb_title_norm2"]
+        ta     = row["tmdb_title_agg"]
+        yr     = row["tmdb_year"]
+        yr_int = None if pd.isna(yr) else int(yr)
 
-    # Match each ML movie: exact year first, then year−1, then year+1
-    mapping: dict[int, int] = {}   # ml movie_id → tmdb index
+        tmdb_title_lkp.setdefault(t2, []).append(idx)
+
+        if yr_int is not None:
+            if (t2, yr_int) not in tmdb_yr_lkp:
+                tmdb_yr_lkp[(t2, yr_int)] = idx
+            if (ta, yr_int) not in tmdb_agg_lkp:
+                tmdb_agg_lkp[(ta, yr_int)] = idx
+            tmdb_by_yr.setdefault(yr_int, []).append((t2, idx))
+
+    # ── Match each ML movie through stages in order ───────────────────────
+    mapping:     dict[int, int] = {}   # ml movie_id → tmdb DataFrame index
+    stage_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+
     for _, ml_row in ml_movies.iterrows():
-        yr = ml_row["year"]
-        if pd.isna(yr):
-            continue
-        yr, mid = int(yr), int(ml_row["movie_id"])
-        title = ml_row["title_norm2"]
-        for offset in (0, -1, 1):
-            if (title, yr + offset) in tmdb_lookup:
-                mapping[mid] = tmdb_lookup[(title, yr + offset)]
-                break
+        mid    = int(ml_row["movie_id"])
+        t2     = ml_row["title_norm2"]
+        ta     = ml_row["title_agg"]
+        yr     = ml_row["year"]
+        yr_int = None if pd.isna(yr) else int(yr)
+        matched = None
 
-    # Build a TMDB slice aligned to matched ML movie IDs and merge
+        # Stage 1 — exact (title_norm2, year)
+        if yr_int is not None:
+            matched = tmdb_yr_lkp.get((t2, yr_int))
+            if matched is not None:
+                stage_counts[1] += 1
+
+        # Stage 2 — (title_norm2, year ±1)
+        if matched is None and yr_int is not None:
+            for off in (-1, 1):
+                m = tmdb_yr_lkp.get((t2, yr_int + off))
+                if m is not None:
+                    matched = m
+                    stage_counts[2] += 1
+                    break
+
+        # Stage 3 — title_norm2 matches exactly ONE TMDB entry (any year)
+        if matched is None:
+            cands = tmdb_title_lkp.get(t2, [])
+            if len(cands) == 1:
+                matched = cands[0]
+                stage_counts[3] += 1
+
+        # Stage 4 — aggressive substitutions (& ↔ and, roman→arabic, strip all "the")
+        if matched is None and yr_int is not None:
+            for off in (0, -1, 1):
+                m = tmdb_agg_lkp.get((ta, yr_int + off))
+                if m is not None:
+                    matched = m
+                    stage_counts[4] += 1
+                    break
+
+        # Stage 5 — fuzzy SequenceMatcher ≥ 0.85 within TMDB ±2 years
+        if matched is None and yr_int is not None:
+            best_ratio, best_idx = 0.0, None
+            for y_off in range(-2, 3):
+                for cand_t2, cand_idx in tmdb_by_yr.get(yr_int + y_off, []):
+                    r = SequenceMatcher(None, t2, cand_t2).ratio()
+                    if r > best_ratio:
+                        best_ratio, best_idx = r, cand_idx
+            if best_ratio >= 0.85:
+                matched = best_idx
+                stage_counts[5] += 1
+
+        if matched is not None:
+            mapping[mid] = matched
+
+    # ── Assemble merged DataFrame ─────────────────────────────────────────
     if mapping:
-        ml_ids = sorted(mapping.keys())
-        tmdb_slice = tmdb.loc[[mapping[mid] for mid in ml_ids]].copy()
-        tmdb_slice = tmdb_slice.reset_index(drop=True)
+        ml_ids     = sorted(mapping.keys())
+        tmdb_slice = tmdb.loc[[mapping[mid] for mid in ml_ids]].copy().reset_index(drop=True)
         tmdb_slice["movie_id"] = ml_ids
         merged = ml_movies.merge(tmdb_slice, on="movie_id", how="left")
     else:
         merged = ml_movies.copy()
 
-    matched = merged["tmdb_id"].notna().sum() if "tmdb_id" in merged.columns else 0
-    total = len(merged)
-    pct = matched / total * 100 if total else 0
-    print(f"  Matched : {matched:,} / {total:,} MovieLens movies ({pct:.1f}%)")
+    # ── Stage breakdown ───────────────────────────────────────────────────
+    total         = len(ml_movies)
+    total_matched = sum(stage_counts.values())
+    pct           = total_matched / total * 100 if total else 0
+    print(f"  Stage 1 — exact year          : {stage_counts[1]:>5,}")
+    print(f"  Stage 2 — year ±1             : {stage_counts[2]:>5,}")
+    print(f"  Stage 3 — title only (unique) : {stage_counts[3]:>5,}")
+    print(f"  Stage 4 — substitutions       : {stage_counts[4]:>5,}")
+    print(f"  Stage 5 — fuzzy ≥ 0.85        : {stage_counts[5]:>5,}")
+    print(f"  {'─'*38}")
+    print(f"  Total matched                 : {total_matched:>5,} / {total:,}  ({pct:.1f}%)")
     return merged
 
 
@@ -229,7 +333,7 @@ def _build_combined_text(row) -> str:
 
 def preprocess():
     print("--- Loading MovieLens ---")
-    ratings = load_movielens_ratings()
+    ratings  = load_movielens_ratings()
     ml_movies = load_movielens_movies()
 
     print("\n--- Loading TMDB ---")
