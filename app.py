@@ -42,9 +42,10 @@ st.markdown("""
         border-top: 3px solid transparent;
         border-image: linear-gradient(90deg, #E81123, #FFF100) 1;
         border-image-slice: 1 1 0 1; transition: background 0.2s;
+        min-height: 160px;
     }
     .movie-card:hover { background: #f5f5f5; }
-    .card-title { color: #1a1a1a; font-size: 15px; font-weight: 500; padding-right: 55px; }
+    .card-title { color: #1a1a1a; font-size: 15px; font-weight: 500; padding-right: 55px; line-height: 1.3; }
     .card-year { color: #aaa; font-size: 12px; margin-top: 2px; }
     .card-rating {
         position: absolute; top: 14px; right: 14px;
@@ -61,6 +62,7 @@ st.markdown("""
     .card-meta {
         border-top: 0.5px solid #f0f0f0; padding-top: 8px; margin-top: 8px;
         color: #bbb; font-size: 11px; font-style: italic;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
     .director-notes {
@@ -89,32 +91,18 @@ st.markdown("""
         line-height: 1.7; margin-bottom: 10px;
     }
     .chat-bot strong { color: #1a1a1a; }
-
     .empty-box { text-align: center; padding: 60px 20px; color: #ccc; font-size: 14px; }
 
-    /* Button styles */
+    /* Buttons */
     .stButton > button {
-        font-weight: 500 !important;
-        font-size: 13px !important;
-        border-radius: 20px !important;
-        padding: 6px 18px !important;
-        background: #f5f5f5 !important;
-        color: #666 !important;
-        border: 0.5px solid #e0e0e0 !important;
-        transition: all 0.15s !important;
+        font-weight: 500 !important; font-size: 13px !important;
+        border-radius: 20px !important; padding: 6px 18px !important;
+        background: #f5f5f5 !important; color: #666 !important;
+        border: 0.5px solid #e0e0e0 !important; transition: all 0.15s !important;
     }
-    .stButton > button:hover {
-        background: #eee !important;
-        color: #333 !important;
-    }
-    .stButton > button:active {
-        transform: scale(0.98) !important;
-    }
-    .stButton > button:disabled {
-        background: #f0f0f0 !important;
-        color: #ccc !important;
-        border: 0.5px solid #e8e8e8 !important;
-    }
+    .stButton > button:hover { background: #eee !important; color: #333 !important; }
+    .stButton > button:active { transform: scale(0.98) !important; }
+    .stButton > button:disabled { background: #f0f0f0 !important; color: #ccc !important; border: 0.5px solid #e8e8e8 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -131,6 +119,15 @@ try:
 except Exception as e:
     pipeline_ready = False
     pipeline_error = str(e)
+
+
+def get_recommender(pipe):
+    """Get the SVD recommender from the pipeline, regardless of attribute name."""
+    for attr in ["recommender", "svd_recommender", "svd", "rec", "svd_rec"]:
+        if hasattr(pipe, attr):
+            return getattr(pipe, attr)
+    return None
+
 
 # ── Session State ──────────────────────────────────────────────────
 for key, default in [("active_tab", "discover"), ("messages", []),
@@ -153,17 +150,25 @@ def clean_title(title):
     return re.sub(r'\s*\(\d{4}\)\s*$', '', str(title)).strip()
 
 
-def card_html(title, year, genres, rating, director=""):
+def card_html(title, year, genres, rating, director="", cast=""):
     ct = clean_title(title)
     yr = str(int(year)) if pd.notna(year) and isinstance(year, float) else (str(year) if pd.notna(year) else "")
     rt = f"{float(rating):.2f}" if pd.notna(rating) else ""
     pills = ""
     if genres and str(genres) != "nan":
-        for g in str(genres).split(","):
+        for g in str(genres).split(",")[:4]:
             g = g.strip()
             if g:
                 pills += f'<span class="genre-pill">{g}</span>'
-    meta = f'<div class="card-meta">{director}</div>' if director and str(director) != "nan" else ""
+    # Build meta line with director and cast
+    meta_parts = []
+    if director and str(director) != "nan":
+        meta_parts.append(str(director))
+    if cast and str(cast) != "nan":
+        meta_parts.append(str(cast))
+    meta_text = " · ".join(meta_parts)
+    meta = f'<div class="card-meta" title="{meta_text}">{meta_text}</div>' if meta_text else ""
+
     return (
         f'<div class="movie-card">'
         f'<div class="card-rating">{STAR}<span>{rt}</span></div>'
@@ -223,10 +228,9 @@ with tc3:
 tab = st.session_state.active_tab
 tab_idx = {"discover": 1, "watchlist": 2, "history": 3}[tab]
 st.markdown(f"""<style>
-div.stColumns:nth-of-type(3) > div:nth-child({tab_idx}) .stButton > button {{
+div.stColumns:nth-of-type(2) > div:nth-child({tab_idx}) .stButton > button {{
     background: linear-gradient(135deg, #E81123, #FF6B00, #FFF100) !important;
-    color: #fff !important;
-    border: none !important;
+    color: #fff !important; border: none !important;
     box-shadow: 0 2px 0 #8B0A15, 0 3px 8px rgba(232,17,35,0.2) !important;
 }}
 </style>""", unsafe_allow_html=True)
@@ -246,16 +250,15 @@ if tab == "discover" and pipeline_ready:
     with h2:
         curate = st.button("CURATE MY LIST", key="curate", use_container_width=True)
 
-    # Style curate button as 3D red
+    # Style curate button
     st.markdown("""<style>
-    button[data-testid="baseButton-secondary"][aria-label="CURATE MY LIST"],
-    div.stColumns:nth-of-type(4) > div:nth-child(2) .stButton > button {
+    div.stColumns:nth-of-type(3) > div:nth-child(2) .stButton > button {
         background: linear-gradient(180deg, #FF3333 0%, #E81123 50%, #C20E1E 100%) !important;
         color: #fff !important; border: none !important; border-radius: 8px !important;
         box-shadow: 0 2px 0 #8B0A15, 0 4px 8px rgba(232,17,35,0.25) !important;
         font-weight: 600 !important; letter-spacing: 0.8px !important; padding: 10px 24px !important;
     }
-    div.stColumns:nth-of-type(4) > div:nth-child(2) .stButton > button:hover {
+    div.stColumns:nth-of-type(3) > div:nth-child(2) .stButton > button:hover {
         box-shadow: 0 3px 0 #8B0A15, 0 6px 12px rgba(232,17,35,0.3) !important;
     }
     </style>""", unsafe_allow_html=True)
@@ -268,24 +271,35 @@ if tab == "discover" and pipeline_ready:
 
     if st.session_state.recs is not None:
         recs_df = st.session_state.recs
-        cols = st.columns(3)
-        for i, (_, r) in enumerate(recs_df.head(6).iterrows()):
-            with cols[i % 3]:
-                t = r.get("title", "Unknown")
-                st.markdown(card_html(t, r.get("year"), r.get("genres_list", r.get("genres", "")),
-                                       r.get("predicted_rating", 0), r.get("director", "")), unsafe_allow_html=True)
-                movie_info = {"title": t, "year": r.get("year"),
-                              "genres": r.get("genres_list", r.get("genres", "")),
-                              "rating": r.get("predicted_rating", 0), "director": r.get("director", "")}
-                already = any(m["title"] == t for m in st.session_state.watchlist)
-                if st.button("Added" if already else "+ Watchlist", key=f"a_{i}", disabled=already):
-                    st.session_state.watchlist.append(movie_info)
-                    st.rerun()
+        rows = [recs_df.head(3), recs_df.iloc[3:6]] if len(recs_df) > 3 else [recs_df.head(3)]
+        for row_df in rows:
+            cols = st.columns(3)
+            for i, (_, r) in enumerate(row_df.iterrows()):
+                col_idx = i % 3
+                with cols[col_idx]:
+                    t = r.get("title", "Unknown")
+                    st.markdown(card_html(
+                        t, r.get("year"),
+                        r.get("genres_list", r.get("genres", "")),
+                        r.get("predicted_rating", 0),
+                        r.get("director", ""),
+                        r.get("cast_list", ""),
+                    ), unsafe_allow_html=True)
+                    movie_info = {"title": t, "year": r.get("year"),
+                                  "genres": r.get("genres_list", r.get("genres", "")),
+                                  "rating": r.get("predicted_rating", 0),
+                                  "director": r.get("director", "")}
+                    already = any(m["title"] == t for m in st.session_state.watchlist)
+                    if st.button("Added" if already else "+ Watchlist",
+                                 key=f"a_{t[:20]}_{i}", disabled=already):
+                        st.session_state.watchlist.append(movie_info)
+                        st.rerun()
 
         if st.session_state.explanation:
             exp = st.session_state.explanation.replace("\n", "<br>")
             st.markdown(f'<div class="director-notes"><div class="dn-label">DIRECTOR\'S NOTES</div><p>{exp}</p></div>', unsafe_allow_html=True)
 
+    # Chat
     st.markdown('<hr style="border:none;border-top:0.5px solid #f0f0f0;margin:24px 0 16px;">', unsafe_allow_html=True)
     for msg in st.session_state.messages:
         cls = "chat-user" if msg["role"] == "user" else "chat-bot"
@@ -299,6 +313,7 @@ if tab == "discover" and pipeline_ready:
         st.session_state.messages.append({"role": "assistant", "content": resp})
         st.rerun()
 
+
 # ══════════════════════════════════════════════════════════════════
 #  WATCHLIST
 # ══════════════════════════════════════════════════════════════════
@@ -310,13 +325,21 @@ elif tab == "watchlist":
         st.markdown('<div class="empty-box"><div style="font-size:36px;color:#e0e0e0;margin-bottom:12px;">&#9734;</div>'
                     'Your watchlist is empty.<br>Discover movies and tap <strong>+ Watchlist</strong> to save them here.</div>', unsafe_allow_html=True)
     else:
-        cols = st.columns(3)
-        for i, m in enumerate(st.session_state.watchlist):
-            with cols[i % 3]:
-                st.markdown(card_html(m["title"], m.get("year"), m.get("genres", ""), m.get("rating", 0), m.get("director", "")), unsafe_allow_html=True)
-                if st.button("Remove", key=f"rm_{i}"):
-                    st.session_state.watchlist = [x for x in st.session_state.watchlist if x["title"] != m["title"]]
-                    st.rerun()
+        wl = st.session_state.watchlist
+        for row_start in range(0, len(wl), 3):
+            cols = st.columns(3)
+            for j in range(3):
+                idx = row_start + j
+                if idx >= len(wl):
+                    break
+                m = wl[idx]
+                with cols[j]:
+                    st.markdown(card_html(m["title"], m.get("year"), m.get("genres", ""),
+                                           m.get("rating", 0), m.get("director", "")), unsafe_allow_html=True)
+                    if st.button("Remove", key=f"rm_{idx}"):
+                        st.session_state.watchlist = [x for x in st.session_state.watchlist if x["title"] != m["title"]]
+                        st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════
 #  HISTORY
@@ -325,26 +348,59 @@ elif tab == "history" and pipeline_ready:
     st.markdown('<h2 style="color:#1a1a1a;font-size:22px;font-weight:500;margin:0 0 4px;">Your viewing history</h2>'
                 '<p style="color:#aaa;font-size:13px;margin:0 0 20px;">Movies you rated, sorted by rating</p>', unsafe_allow_html=True)
 
-    with st.spinner("Loading your history..."):
-        hist_df = pipeline.recommender.get_user_history(user_id)
+    # Try multiple attribute names for the recommender
+    rec = get_recommender(pipeline)
+    hist_df = pd.DataFrame()
+
+    if rec is not None and hasattr(rec, "get_user_history"):
+        with st.spinner("Loading your history..."):
+            hist_df = rec.get_user_history(user_id)
+    else:
+        # Fallback: try calling it directly on the pipeline
+        try:
+            with st.spinner("Loading your history..."):
+                hist_df = pipeline.get_user_history(user_id)
+        except AttributeError:
+            # Last resort: load ratings manually
+            try:
+                from config import PROCESSED_DIR
+                ratings = pd.read_csv(PROCESSED_DIR / "ratings.csv")
+                movies = pd.read_csv(PROCESSED_DIR / "movies.csv")
+                user_ratings = ratings[ratings["user_id"] == user_id]
+                hist_df = user_ratings.merge(movies, on="movie_id", how="left")
+                hist_df = hist_df.sort_values("rating", ascending=False)
+            except Exception as ex:
+                st.error(f"Could not load history: {ex}")
 
     if hist_df.empty:
         st.markdown('<div class="empty-box"><div style="font-size:36px;color:#e0e0e0;margin-bottom:12px;">&#9201;</div>'
                     'No viewing history found for this user.</div>', unsafe_allow_html=True)
     else:
         top = hist_df.head(30)
-        cols = st.columns(3)
-        for i, (_, r) in enumerate(top.iterrows()):
-            with cols[i % 3]:
-                t = r.get("title", "Unknown")
-                st.markdown(card_html(t, r.get("year"), r.get("genres_list", r.get("genres", "")),
-                                       r.get("rating"), r.get("director", "")), unsafe_allow_html=True)
-                already = any(m["title"] == t for m in st.session_state.watchlist)
-                if st.button("Added" if already else "+ Watchlist", key=f"h_{i}", disabled=already):
-                    st.session_state.watchlist.append({"title": t, "year": r.get("year"),
-                        "genres": r.get("genres_list", r.get("genres", "")),
-                        "rating": r.get("rating"), "director": r.get("director", "")})
-                    st.rerun()
+        for row_start in range(0, len(top), 3):
+            cols = st.columns(3)
+            for j in range(3):
+                idx = row_start + j
+                if idx >= len(top):
+                    break
+                r = top.iloc[idx]
+                with cols[j]:
+                    t = r.get("title", "Unknown")
+                    st.markdown(card_html(
+                        t, r.get("year"),
+                        r.get("genres_list", r.get("genres", "")),
+                        r.get("rating"),
+                        r.get("director", ""),
+                        r.get("cast_list", ""),
+                    ), unsafe_allow_html=True)
+                    already = any(m["title"] == t for m in st.session_state.watchlist)
+                    if st.button("Added" if already else "+ Watchlist",
+                                 key=f"h_{idx}", disabled=already):
+                        st.session_state.watchlist.append({
+                            "title": t, "year": r.get("year"),
+                            "genres": r.get("genres_list", r.get("genres", "")),
+                            "rating": r.get("rating"), "director": r.get("director", "")})
+                        st.rerun()
 
 elif not pipeline_ready:
     st.markdown('<div class="empty-box"><div style="font-size:36px;color:#e0e0e0;margin-bottom:12px;">&#9888;</div>'
