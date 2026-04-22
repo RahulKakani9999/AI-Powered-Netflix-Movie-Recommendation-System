@@ -58,7 +58,6 @@ st.markdown("""
         color: #d4200e; font-size: 11px; padding: 3px 10px; border-radius: 20px;
         border: 0.5px solid rgba(232,17,35,0.12); margin: 2px;
     }
-    .no-genre { color: #ddd; font-size: 11px; }
     .card-meta {
         border-top: 0.5px solid #f0f0f0; padding-top: 8px; margin-top: 8px;
         color: #bbb; font-size: 11px; font-style: italic;
@@ -106,7 +105,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Pipeline ───────────────────────────────────────────────────────
 @st.cache_resource
 def load_pipeline():
     from utils.pipeline import RecommendationPipeline
@@ -128,7 +126,6 @@ def get_recommender(pipe):
     return None
 
 
-# ── Session State ──────────────────────────────────────────────────
 for key, default in [("active_tab", "discover"), ("messages", []),
                       ("recs", None), ("explanation", None), ("watchlist", [])]:
     if key not in st.session_state:
@@ -162,7 +159,7 @@ def parse_genres(row):
 
 def build_genre_html(genres_list):
     if not genres_list:
-        return '<span class="no-genre">No genre data</span>'
+        return ''
     html = ""
     for g in genres_list[:4]:
         html += '<span class="genre-pill">' + g + '</span>'
@@ -199,13 +196,13 @@ def card_html(title, year, genres_list, rating, director="", cast=""):
     result += '<div class="card-rating">' + STAR + '<span>' + rt + '</span></div>'
     result += '<div class="card-title">' + ct + '</div>'
     result += '<div class="card-year">' + yr + '</div>'
-    result += '<div style="margin:8px 0">' + genre_html + '</div>'
+    if genre_html:
+        result += '<div style="margin:8px 0">' + genre_html + '</div>'
     result += meta_html
     result += '</div>'
     return result
 
 
-# ── Nav Bar ────────────────────────────────────────────────────────
 if pipeline_ready:
     valid_users = pipeline.get_valid_users(sample=20)
 else:
@@ -245,7 +242,6 @@ if not pipeline_ready:
         unsafe_allow_html=True,
     )
 
-# ── Tabs ───────────────────────────────────────────────────────────
 wl_count = len(st.session_state.watchlist)
 tc1, tc2, tc3, _ = st.columns([1, 1.2, 1, 5])
 with tc1:
@@ -275,9 +271,6 @@ st.markdown(
 )
 
 
-# ══════════════════════════════════════════════════════════════════
-#  DISCOVER
-# ══════════════════════════════════════════════════════════════════
 if tab == "discover" and pipeline_ready:
     h1, h2 = st.columns([4, 1.5])
     with h1:
@@ -373,9 +366,6 @@ if tab == "discover" and pipeline_ready:
         st.rerun()
 
 
-# ══════════════════════════════════════════════════════════════════
-#  WATCHLIST
-# ══════════════════════════════════════════════════════════════════
 elif tab == "watchlist":
     st.markdown(
         '<h2 style="color:#1a1a1a;font-size:22px;font-weight:500;margin:0 0 4px;">Your watchlist</h2>'
@@ -420,9 +410,6 @@ elif tab == "watchlist":
                         st.rerun()
 
 
-# ══════════════════════════════════════════════════════════════════
-#  HISTORY
-# ══════════════════════════════════════════════════════════════════
 elif tab == "history" and pipeline_ready:
     st.markdown(
         '<h2 style="color:#1a1a1a;font-size:22px;font-weight:500;margin:0 0 4px;">Your viewing history</h2>'
